@@ -2,7 +2,7 @@
 
 README dành cho GitHub: mô tả tổng quát hệ thống RAG, cách cài đặt/chạy Backend (FastAPI) và App (Streamlit), cùng cấu trúc thư mục.
 
-![Architecture](system.png)
+![Architecture](docs/system.png)
 
 ## Tính năng chính (tóm tắt)
 - Semantic Chunking (LangChain SemanticChunker)
