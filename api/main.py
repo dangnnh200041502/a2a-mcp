@@ -1,7 +1,7 @@
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from pydantic_models import QueryInput, QueryResponse, DocumentInfo, DeleteFileRequest
 from langchain_utils import get_rag_chain, get_advanced_rag_pipeline
-from query_router import route_query
+from agent_manager import AgentManager
 from db_utils import insert_application_logs, get_chat_history, get_all_documents, insert_document_record, delete_document_record
 from pinecone_utils import index_document_to_pinecone, delete_doc_from_pinecone
 import os
@@ -29,46 +29,49 @@ def chat(query_input: QueryInput):
 
     # Router: nếu out-of-scope (route=0) -> trả câu lịch sự, KHÔNG lưu session/log
     try:
-        router_res = route_query(effective_question) or {}
-        route = int(router_res.get("route", 1))
-        reason = str(router_res.get("reason", ""))
+        agent = AgentManager()
+        # Prefer checking the ORIGINAL question for calculator detection to avoid
+        # contextualization removing numbers/operators.
+        orig_decision = agent.decide_tool(query_input.question)
+        if orig_decision.get("tool") == "calculator":
+            decision = orig_decision
+        else:
+            decision = agent.decide_tool(effective_question)
+        tool = decision.get("tool", "rag")
+        reason = decision.get("reason", "")
     except Exception as e:
-        logging.error(f"Router error: {e}")
-        route, reason = 1, "router_error"
+        logging.error(f"Agent manager error: {e}")
+        tool, reason = "rag", "agent_error"
 
-    if route == 0:
+    if tool == "calculator":
         # Generate a polite no-info response via LLM (no logging/no session persistence)
-        llm = ChatGroq(
-            groq_api_key=os.getenv("GROQ_API_KEY"),
-            model_name="openai/gpt-oss-20b"
-        )
-        prompt = (
-            "You are a helpful assistant. The user's question is out of scope for this system "
-            "and not covered by our internal documents. Do not fabricate information. "
-            "Politely say you don't have information on that topic and cannot provide real-time data. "
-            "Respond in concise English, 1-2 short sentences.\n\n"
-            f"User question: {query_input.question}"
-        )
         try:
-            answer_obj = llm.invoke(prompt)
-            answer = getattr(answer_obj, "content", str(answer_obj))
+            calc_res = agent.use_calculator(effective_question)
+            if calc_res.get("error") is None:
+                answer = f"Result: {calc_res.get('result')}"
+            else:
+                answer = "I couldn't evaluate that expression."
         except Exception:
-            answer = "I'm sorry, I don't have information on that topic."
-        logging.info(f"Routed=0 ({reason}), no session saved.")
-        return QueryResponse(answer=answer, session_id=(session_id or ""))
+            answer = "I couldn't evaluate that expression."
+        # Ensure session id and save logs like other paths
+        if not session_id:
+            session_id = str(uuid.uuid4())
+        insert_application_logs(session_id, query_input.question, answer)
+        logging.info(f"Calculator used ({reason}), session saved.")
+        return QueryResponse(answer=answer, session_id=session_id, tool_used="calculator")
 
     if not session_id:
         session_id = str(uuid.uuid4())
 
+    # For basic chat, keep existing RAG chain behavior
     rag_chain = get_rag_chain()
     answer = rag_chain.invoke({
         "input": query_input.question,
         "chat_history": chat_history
     })['answer']
-    
     insert_application_logs(session_id, query_input.question, answer)
     logging.info(f"Session ID: {session_id}, AI Response: {answer}")
-    return QueryResponse(answer=answer, session_id=session_id)
+    return QueryResponse(answer=answer, session_id=session_id, tool_used="rag_basic")
 
  
 
@@ -90,32 +93,33 @@ def chat_with_advanced_pipeline(query_input: QueryInput):
 
     # Router: nếu out-of-scope (route=0) -> trả câu lịch sự, KHÔNG lưu session/log
     try:
-        router_res = route_query(effective_question) or {}
-        route = int(router_res.get("route", 1))
-        reason = str(router_res.get("reason", ""))
+        agent = AgentManager()
+        # Prefer checking original question first for calculator path
+        orig_decision = agent.decide_tool(query_input.question)
+        if orig_decision.get("tool") == "calculator":
+            decision = orig_decision
+        else:
+            decision = agent.decide_tool(effective_question)
+        tool = decision.get("tool", "rag")
+        reason = decision.get("reason", "")
     except Exception as e:
-        logging.error(f"Router error: {e}")
-        route, reason = 1, "router_error"
+        logging.error(f"Agent manager error: {e}")
+        tool, reason = "rag", "agent_error"
 
-    if route == 0:
-        llm = ChatGroq(
-            groq_api_key=os.getenv("GROQ_API_KEY"),
-            model_name="openai/gpt-oss-20b"
-        )
-        prompt = (
-            "You are a helpful assistant. The user's question is out of scope for this system "
-            "and not covered by our internal documents. Do not fabricate information. "
-            "Politely say you don't have information on that topic and cannot provide real-time data. "
-            "Respond in concise English, 1-2 short sentences.\n\n"
-            f"User question: {query_input.question}"
-        )
+    if tool == "calculator":
         try:
-            answer_obj = llm.invoke(prompt)
-            answer = getattr(answer_obj, "content", str(answer_obj))
+            calc_res = agent.use_calculator(effective_question)
+            if calc_res.get("error") is None:
+                answer = f"Result: {calc_res.get('result')}"
+            else:
+                answer = "I couldn't evaluate that expression."
         except Exception:
-            answer = "I'm sorry, I don't have information on that topic."
-        logging.info(f"Routed=0 ({reason}), no session saved.")
-        return {"answer": answer, "session_id": (session_id or ""), "method": "router_0"}
+            answer = "I couldn't evaluate that expression."
+        if not session_id:
+            session_id = str(uuid.uuid4())
+        insert_application_logs(session_id, query_input.question, answer)
+        logging.info(f"Calculator used ({reason}), session saved.")
+        return {"answer": answer, "session_id": session_id, "tool_used": "calculator"}
 
     if not session_id:
         session_id = str(uuid.uuid4())
@@ -124,36 +128,38 @@ def chat_with_advanced_pipeline(query_input: QueryInput):
     chat_history = get_chat_history(session_id)
 
     try:
-        # Khởi tạo Advanced RAG Pipeline
-        advanced_pipeline = get_advanced_rag_pipeline(
-            retrieval_k=5,      # Số documents retrieval cho mỗi query
-            rrf_k=60.0,         # Constant cho RRF
-            rerank_top_k=10,    # Số documents sau reranking
-            rerank_threshold=0.5 # Ngưỡng score tối thiểu sau reranking
+        # Full orchestration with Agent Manager: retrieve docs and generate via GPT-OSS
+        agent = AgentManager()
+        orchestration = agent.orchestrate_answer(
+            question,
+            chat_history,
         )
-        
-        # Chạy toàn bộ pipeline
-        # Có thể truyền original; pipeline sẽ contextualize lại. Ở đây giữ nguyên luồng
-        result = advanced_pipeline.run_pipeline(question, chat_history)
-        
         # Lưu conversation vào database
-        insert_application_logs(session_id, question, result["answer"])
+        insert_application_logs(session_id, question, orchestration.get("answer", ""))
         logging.info(f"Advanced pipeline completed - Session: {session_id}, Question: '{question}'")
         
-        # Trả về kết quả chi tiết
-        return {
-            "answer": result["answer"],
+        meta = orchestration.get("meta", {})
+        tools_used = orchestration.get("tools_used") or []
+        response = {
+            "answer": orchestration.get("answer", ""),
             "session_id": session_id,
-            "method": "advanced_pipeline",
-            "pipeline_info": {
-                "retrieval_k": result.get("retrieved_docs_count", 0),
-                "fused_docs": result.get("fused_docs_count", 0),
-                "final_docs": result.get("final_docs_count", 0),
-                "expanded_queries": result.get("expanded_queries", []),
-                "pipeline_status": result.get("pipeline_status", "unknown")
-            },
-            "final_documents": result.get("final_documents", [])
+            "tool_used": tools_used,
+            "subtasks": orchestration.get("subtasks", []),
+            "sufficient": orchestration.get("sufficient", True)
         }
+
+        # Chỉ bổ sung thông tin retrieval khi có dùng RAG
+        if any(t == "rag_retrieval" for t in tools_used):
+            response["pipeline_info"] = {
+                "retrieval_k": meta.get("retrieved_docs_count", 0),
+                "fused_docs": meta.get("fused_docs_count", 0),
+                "final_docs": meta.get("final_docs_count", 0),
+                "expanded_queries": meta.get("expanded_queries", []),
+                "pipeline_status": "completed"
+            }
+            response["final_documents"] = orchestration.get("final_documents", [])
+
+        return response
         
     except Exception as e:
         logging.error(f"Advanced pipeline error: {e}")
