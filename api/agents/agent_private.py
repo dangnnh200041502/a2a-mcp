@@ -46,13 +46,26 @@ class AgentPrivate:
         except Exception:
             return original_query
 
+    def _extract_entity(self, question: str) -> str | None:
+        """Try to extract entity name from patterns like 'When was X founded' or 'Where is X headquartered'."""
+        import re
+        text = (question or "").strip()
+        m = re.search(r"When\s+was\s+(.+?)\s+founded", text, re.I)
+        if m:
+            return m.group(1).strip()
+        m = re.search(r"Where\s+is\s+(.+?)\s+headquartered", text, re.I)
+        if m:
+            return m.group(1).strip()
+        return None
+
     def search(self, question: str, chat_history: List[Dict[str, Any]] | None = None) -> Dict[str, Any]:
         # 0) Contextualize (optional, improves coreference handling)
         question = self._contextualize(question, chat_history)
 
-        # 1) Expansion
-        exp = self._mcp.call("expansion", {"query": question})
+        # 1) Expansion using MCP tool (aware of chat history and multi-asks)
+        exp = self._mcp.call("expansion", {"query": question, "chat_history": chat_history})
         queries: List[str] = exp.get("queries", [question])
+        # Không gắn cứng facet; expansion tool đã tách các asks nếu cần
 
         # 2) Retrieve for each query
         retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
