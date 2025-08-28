@@ -3,6 +3,7 @@
 Tools:
 - rag_retrieval: Multi-Query → RRF → Rerank (returns final reranked documents)
 - calculator: Evaluate simple arithmetic expressions when user asks to compute
+- weather: Get weather information (toy implementation)
 
 Usage (khuyến nghị):
     manager = AgentManager()
@@ -16,24 +17,24 @@ import re
 from typing import Any, Dict, List
 import os
 
-from langchain_utils import get_advanced_rag_pipeline  # nếu bạn không dùng trực tiếp có thể giữ import
 from langchain_groq import ChatGroq
-from private_agent import PrivateDataAgent
-from final_agent import FinalAgent
+from mcp.client_factory import create_mcp_client
+from query_analyzer import QueryAnalyzer
 
 
 class AgentManager:
     """Selects and runs tools for queries (multi-intent aware)."""
 
     # ---------- class-level regex / tokens ----------
-    _SAFE_PATTERN = re.compile(r"^[\s\d\+\-\*/\(\)\.]+$")
-    _OP_TOKENS = ("+", "-", "*", "/")
-    _NL_CALC_HINTS = (
-        "tinh", "tính", "sum", "plus", "add", "calculate", "calc",
-        "total", "result of",
+    # legacy calc/weather hints now handled in tool modules
+    _PRIVATE_HINTS = (
+        # simple heuristics for private data needs (entities/docs/internal)
+        "greengrow", "quantumnext", "techwave", "greenfields",
+        "document", "kb", "knowledge base", "internal", "private",
     )
-    _WEATHER_HINTS = (
-        "weather", "thoi tiet", "thời tiết", "forecast", "rain", "sunny", "temperature",
+    _GREETING_HINTS = (
+        "hello", "hi", "hey", "greetings", "good morning", "good afternoon", "good evening",
+        "xin chào", "chào", "chao", "chào bạn", "chào anh", "chào chị", "yo", "sup"
     )
     _MULTI_SEP = re.compile(r"\?+|\s+(?:and|&)\s+|,\s+", re.I)
 
@@ -44,163 +45,178 @@ class AgentManager:
             groq_api_key=os.getenv("GROQ_API_KEY"),
             model_name="openai/gpt-oss-20b",
         )
-        self._private_agent = PrivateDataAgent()
-        self._final_agent = FinalAgent()
-        self._last_expr: str | None = None
+        self._mcp = create_mcp_client()
+        self._query_analyzer = QueryAnalyzer()
 
     # ==========================
-    # Helpers: splitting & routing
+    # Query Analysis Integration
     # ==========================
-    def _split_candidates(self, raw: str) -> List[str]:
-        """Tách chuỗi người dùng thành các câu hỏi con (sub-queries) tiềm năng."""
-        raw = re.sub(r"\s+", " ", (raw or "").strip())
+    def _analyze_query_with_llm(self, raw: str) -> List[str]:
+        """Use QueryAnalyzer to analyze and split query into subtasks."""
+        return self._query_analyzer.analyze_query(raw)
 
-        # 1) Ưu tiên tách theo '?'
-        parts_q = [p.strip() for p in re.split(r"\?+", raw) if p.strip()]
-        if len(parts_q) >= 2:
-            return [p if p.endswith("?") else p + "?" for p in parts_q]
 
-        # 2) Fallback: tách theo 'and', '&', hoặc dấu phẩy
-        parts = [p.strip() for p in self._MULTI_SEP.split(raw) if p.strip()]
-
-        # 3) Lọc nhiễu & giữ lại vế có tính chất câu hỏi/biểu thức
-        keep: List[str] = []
-        for p in parts:
-            lp = p.lower()
-            is_interrogative = any(w in lp for w in ["what", "when", "where", "who", "how", "which"])
-            has_math = (any(op in lp for op in self._OP_TOKENS) and re.search(r"\d", lp)) or ("result of" in lp)
-            if is_interrogative or has_math:
-                keep.append(p if p.endswith("?") else p + "?")
-
-        return keep or [raw if raw.endswith("?") else raw + "?"]
-
-    def _has_mixed_intents(self, chunks: List[str]) -> bool:
-        """Có cả câu toán và câu cần RAG trong cùng lượt không?"""
-        saw_calc, saw_rag = False, False
-        for c in chunks:
-            if self._looks_like_calculation(c):
-                saw_calc = True
-            else:
-                saw_rag = True
-        return saw_calc and saw_rag
 
     # ==========================
     # Decision
     # ==========================
-    def decide_tool(self, question: str) -> Dict[str, Any]:
+    def decide_tool(self, question: str, chat_history: List[Dict[str, Any]] | None = None) -> Dict[str, Any]:
         """
         Quyết định cho lượt hỏi hiện tại:
-        - 'multi' nếu phát hiện nhiều câu hỏi hoặc ý định lẫn nhau (calc + rag).
+        - 'multi' nếu phát hiện nhiều câu hỏi.
         - 'calculator' nếu 1 câu đơn là phép tính.
         - 'weather' nếu 1 câu đơn hỏi thời tiết.
-        - 'rag' cho các trường hợp còn lại.
+        - 'rag' nếu cần private data.
+        - 'direct' cho tất cả trường hợp còn lại (bao gồm greeting/general).
         """
-        chunks = self._split_candidates(question)
-        if len(chunks) > 1 or self._has_mixed_intents(chunks):
+        chunks = self._analyze_query_with_llm(question)
+        if len(chunks) > 1:
             return {"tool": "multi", "reason": "multi-intent detected", "chunks": chunks}
 
-        if self._looks_like_weather(question):
+        # If the single chunk differs from original (LLM likely normalized entity), prefer using it for downstream
+        normalized = chunks[0] if chunks else question
+        if normalized and normalized != question:
+            question = normalized
+
+        if self._mcp.detect("weather", question):
             return {"tool": "weather", "reason": "weather intent"}
 
-        if self._looks_like_calculation(question):
+        if self._mcp.detect("calculator", question):
             return {"tool": "calculator", "reason": "detected arithmetic expression"}
 
-        return {"tool": "rag", "reason": "default retrieval path"}
+        # Heuristic: use private search if looks like private data OR relies on prior context
+        if self._looks_like_private_data(question) or self._needs_context_from_history(question, chat_history):
+            return {"tool": "rag", "reason": "private data likely needed"}
 
-    # ==========================
-    # Calculator
-    # ==========================
-    def _extract_math_expression(self, text: str) -> str | None:
-        # Loại bỏ ký tự không an toàn; giữ số, +-*/(). và khoảng trắng
-        candidate = re.sub(r"[^0-9\+\-\*/\(\)\.\s]", "", text)
-        candidate = candidate.strip().strip("=?")
-        candidate = re.sub(r"\s+", " ", candidate)
-        # Cần có ít nhất 1 chữ số và 1 toán tử
-        if any(op in candidate for op in self._OP_TOKENS) and re.search(r"\d", candidate):
-            if self._SAFE_PATTERN.match(candidate):
-                return candidate
-        return None
+        return {"tool": "direct", "reason": "direct LLM response (no tools)"}
 
-    def _looks_like_calculation(self, question: str) -> bool:
-        text = (question or "").strip().lower()
-        has_hint = any(h in text for h in self._NL_CALC_HINTS)
-        has_digits_ops = any(op in text for op in self._OP_TOKENS) and re.search(r"\d", text)
-        if not (has_hint or has_digits_ops):
+    def _needs_context_from_history(self, question: str, chat_history: List[Dict[str, Any]] | None) -> bool:
+        """Detect questions that probably refer to previous entity (pronouns/ellipsis)."""
+        if not chat_history:
             return False
-        expr = self._extract_math_expression(text)
-        if expr:
-            self._last_expr = expr
-            return True
-        return False
-
-    # ==========================
-    # Weather (toy) detector & tool
-    # ==========================
-    def _looks_like_weather(self, question: str) -> bool:
         text = (question or "").strip().lower()
-        return any(h in text for h in self._WEATHER_HINTS)
+        # simple pronoun/ellipsis hints
+        hints = (" it ", " its ", " they ", " their ", "where is it", "when was it", "headquartered", "founded")
+        # pad spaces to detect whole-word for ' it '
+        padded = f" {text} "
+        return any(h in padded for h in hints)
+
+    def _looks_like_private_data(self, question: str) -> bool:
+        text = (question or "").strip().lower()
+        return any(h in text for h in self._PRIVATE_HINTS)
+
+    # calculator/weather detection delegated to tool modules
+
+    def _looks_like_greeting(self, question: str) -> bool:
+        text = (question or "").strip().lower()
+        # Match whole words only to avoid 'yo' matching in 'you'
+        greeting_pattern = (
+            r"\b(?:hello|hi|hey|greetings|good\s+morning|good\s+afternoon|good\s+evening|"
+            r"xin\s+chào|chào|chao|chào\s+bạn|chào\s+anh|chào\s+chị|yo|sup)\b"
+        )
+        if len(text) <= 40 and re.search(greeting_pattern, text):
+            return True
+        return text in ("hello", "hi", "hey", "xin chào", "chào")
 
     def use_weather(self, question: str) -> Dict[str, Any]:
-        # Toy tool: always sunny
-        return {"tool": "weather", "location": None, "status": "sunny"}
+        return self._mcp.call("weather", {"question": question})
 
     def use_calculator(self, expression: str) -> Dict[str, Any]:
-        """Safely evaluate a basic arithmetic expression (context fence)."""
-        expr = (self._last_expr or "").strip()
-        if not expr:
-            expr = self._extract_math_expression((expression or "").strip()) or ""
-        if not self._SAFE_PATTERN.match(expr):
-            return {"tool": "calculator", "error": "unsupported expression", "result": None}
-        try:
-            result = eval(expr, {"__builtins__": {}}, {})
-            return {"tool": "calculator", "result": result}
-        except Exception as e:
-            return {"tool": "calculator", "error": str(e), "result": None}
+        return self._mcp.call("calculator", {"natural_text": expression})
 
     # ==========================
-    # Generation via GPT-OSS (giữ nguyên)
+    # Generation via GPT-OSS (main method for final answer generation)
     # ==========================
-    def _format_docs_as_context(self, documents: List[Any]) -> str:
-        parts = []
-        for doc in documents or []:
-            content = getattr(doc, "content", None)
-            if not content:
-                continue
-            parts.append(str(content))
+    def _format_context(self, subtasks: List[Dict[str, Any]]) -> str:
+        """Format context from tool outputs for final answer generation."""
+        parts: List[str] = []
+        for idx, st in enumerate(subtasks, start=1):
+            if st.get("type") == "rag":
+                docs = st.get("final_documents", [])
+                doc_snippets = []
+                for d in docs[:10]:
+                    content = (d.get("content") or "")
+                    if len(content) > 400:
+                        content = content[:400] + "..."
+                    doc_snippets.append(f"- {content}")
+                parts.append(
+                    f"Evidence for '{st.get('question')}':\n" +
+                    ("\n".join(doc_snippets) if doc_snippets else "(no docs)")
+                )
+            elif st.get("type") == "calculator":
+                parts.append(
+                    f"Calculation: {st.get('question')} = {st.get('result')}"
+                )
+            elif st.get("type") == "weather":
+                parts.append(
+                    f"Weather: {st.get('status')}"
+                )
+            elif st.get("type") == "greeting":
+                parts.append(
+                    f"Greeting: {st.get('answer')}"
+                )
         return "\n\n".join(parts)
 
-    def generate_with_gpt_oss(
+    def generate_final_answer(
         self,
-        question: str,
-        documents: List[Any],
+        original_question: str, 
+        subtasks: List[Dict[str, Any]], 
         chat_history: List[Dict[str, Any]] | None = None
     ) -> str:
-        context = self._format_docs_as_context(documents)
-        if not context:
-            prompt = f"Answer concisely: {question}"
-            resp = self._llm.invoke(prompt)
-            return getattr(resp, "content", str(resp))
+        """Generate final answer using GPT-OSS from tool outputs."""
+        context = self._format_context(subtasks)
 
         if chat_history:
-            history_lines = []
+            hist_lines = []
             for m in chat_history:
                 role = m.get("role")
                 content = m.get("content", "")
                 if role == "human":
-                    history_lines.append(f"User: {content}")
+                    hist_lines.append(f"User: {content}")
                 elif role == "ai":
-                    history_lines.append(f"Assistant: {content}")
-            history_text = "\n".join(history_lines)
+                    hist_lines.append(f"Assistant: {content}")
+            hist_text = "\n".join(hist_lines)
             prompt = (
-                "You are a helpful AI assistant. Use the following retrieved context and chat "
-                "history to answer the user's question as accurately and concisely as possible.\n\n"
-                f"Context:\n{context}\n\nChat History:\n{history_text}\n\nQuestion: {question}\nAnswer:"
+                "You are a helpful AI assistant. Using ONLY the provided information below, answer the user's question(s). "
+                "If multiple questions appear, answer each clearly in order. Do not mention your process or any tools. "
+                "Keep the answer concise and factual.\n\n"
+                f"Original Question: {original_question}\n\nContext:\n{context}\n\nChat History:\n{hist_text}\n\nFinal Answer:"
             )
         else:
             prompt = (
-                "You are a helpful AI assistant. Use the following retrieved context to answer "
-                "the user's question as accurately and concisely as possible.\n\n"
-                f"Context:\n{context}\n\nQuestion: {question}\nAnswer:"
+                "You are a helpful AI assistant. Using ONLY the provided information below, answer the user's question(s). "
+                "If multiple questions appear, answer each clearly in order. Do not mention your process or any tools. "
+                "Keep the answer concise and factual.\n\n"
+                f"Original Question: {original_question}\n\nContext:\n{context}\n\nFinal Answer:"
+            )
+
+        resp = self._llm.invoke(prompt)
+        return getattr(resp, "content", str(resp))
+
+    def generate_direct_answer(
+        self,
+        user_text: str,
+        chat_history: List[Dict[str, Any]] | None = None
+    ) -> str:
+        """Generate a short, natural reply directly (no tools). Used for greetings/small talk."""
+        if chat_history:
+            hist_lines: List[str] = []
+            for m in chat_history:
+                role = m.get("role")
+                content = m.get("content", "")
+                if role == "human":
+                    hist_lines.append(f"User: {content}")
+                elif role == "ai":
+                    hist_lines.append(f"Assistant: {content}")
+            hist_text = "\n".join(hist_lines)
+            prompt = (
+                "You are a friendly, concise assistant. Respond naturally to the user's greeting or small talk.\n\n"
+                f"Chat History:\n{hist_text}\n\nUser: {user_text}\nAssistant:"
+            )
+        else:
+            prompt = (
+                "You are a friendly, concise assistant. Respond naturally to the user's greeting or small talk.\n\n"
+                f"User: {user_text}\nAssistant:"
             )
         resp = self._llm.invoke(prompt)
         return getattr(resp, "content", str(resp))
@@ -214,34 +230,24 @@ class AgentManager:
         chat_history: List[Dict[str, Any]] | None = None
     ) -> Dict[str, Any]:
         """Full agentic flow với planning & multi-tool orchestration."""
-        raw = (question or "").strip()
-        raw_norm = re.sub(r"\s+", " ", raw)
-
-        # Tách câu hỏi thành candidates
-        parts_q = [p.strip() for p in re.split(r"\?+", raw_norm) if p.strip()]
-        if len(parts_q) >= 2:
-            candidates: List[str] = [p if p.endswith("?") else p + "?" for p in parts_q]
-        else:
-            temp = re.split(r"\s+(?:and|&)\s+|,\s+", raw_norm)
-            temp = [t.strip() for t in temp if t.strip()]
-            if len(temp) >= 2:
-                candidates = []
-                for t in temp:
-                    lt = t.lower()
-                    is_interrogative = any(w in lt for w in ["what", "when", "where", "who", "how", "which"])
-                    has_math = (any(op in lt for op in self._OP_TOKENS) and re.search(r"\d", lt)) or ("result of" in lt)
-                    if is_interrogative or has_math:
-                        candidates.append(t if t.endswith("?") else t + "?")
-                if not candidates:
-                    candidates = [raw_norm]
-            else:
-                candidates = [raw_norm]
+        # Sử dụng LLM để phân tích query thành subtasks
+        candidates = self._analyze_query_with_llm(question)
 
         subtasks: List[Dict[str, Any]] = []
         tools_used: List[str] = []
 
         for sub_q in candidates:
-            if self._looks_like_weather(sub_q):
+            # Handle greeting chunks (no tools needed, but track in subtasks)
+            if self._looks_like_greeting(sub_q):
+                da = self.generate_direct_answer(sub_q, chat_history)
+                subtasks.append({
+                    "type": "greeting",
+                    "question": sub_q,
+                    "answer": da,
+                })
+                continue
+
+            if self._mcp.detect("weather", sub_q):
                 w = self.use_weather(sub_q)
                 tools_used.append("weather")
                 subtasks.append({
@@ -249,7 +255,7 @@ class AgentManager:
                     "question": sub_q,
                     **w,
                 })
-            elif self._looks_like_calculation(sub_q):
+            elif self._mcp.detect("calculator", sub_q):
                 calc = self.use_calculator(sub_q)
                 tools_used.append("calculator")
                 subtasks.append({
@@ -259,8 +265,8 @@ class AgentManager:
                     "error": calc.get("error"),
                 })
             else:
-                # Route sang RAG cho câu tri thức
-                rag = self._private_agent.run_rag_retrieval(sub_q, chat_history)
+                # Route sang RAG cho câu tri thức qua MCP
+                rag = self._mcp.call("private_search", {"question": sub_q, "chat_history": chat_history})
                 tools_used.append("rag_retrieval")
                 subtasks.append({
                     "type": "rag",
@@ -279,7 +285,7 @@ class AgentManager:
                 sufficient = False
 
         # Sinh câu trả lời cuối
-        final_answer = self._final_agent.generate(question, subtasks, chat_history)
+        final_answer = self.generate_final_answer(question, subtasks, chat_history)
 
         # Chỉ gắn meta/final_documents nếu có RAG
         has_rag = any(st.get("type") == "rag" for st in subtasks)
@@ -328,20 +334,29 @@ class AgentManager:
         """
         Entrypoint khuyến nghị.
         - Multi-intent -> orchestrate_answer()
-        - Weather câu đơn -> use_weather() (schema gọn, không meta/final_docs)
-        - Calculator câu đơn -> use_calculator() (schema gọn)
-        - RAG câu đơn -> run_rag + final_agent
+        - Direct (greeting, general) -> generate_direct_answer() [no tools]
+        - Weather câu đơn -> use_weather() + generate_final_answer()
+        - Calculator câu đơn -> use_calculator() + generate_final_answer()
+        - RAG câu đơn -> run_rag + generate_final_answer()
         """
-        decision = self.decide_tool(question)
+        decision = self.decide_tool(question, chat_history)
 
         if decision["tool"] == "multi":
             return self.orchestrate_answer(question, chat_history)
 
+        if decision["tool"] == "direct":
+            # Direct LLM response (greeting, general questions)
+            final = self.generate_direct_answer(question, chat_history)
+            return {
+                "answer": final,
+                "sufficient": True
+            }
+
         if decision["tool"] == "weather":
             w = self.use_weather(question)
-            # Vẫn đi qua FinalAgent để thống nhất giọng văn
+            # Vẫn đi qua generate_final_answer để thống nhất giọng văn
             subtasks = [{"type": "weather", "question": question, **w}]
-            final = self._final_agent.generate(question, subtasks, chat_history)
+            final = self.generate_final_answer(question, subtasks, chat_history)
             return {
                 "tools_used": ["weather"],
                 "answer": final,
@@ -352,17 +367,19 @@ class AgentManager:
 
         if decision["tool"] == "calculator":
             calc = self.use_calculator(question)
-            text = "Result: " + (str(calc["result"]) if calc.get("error") is None else "Error")
+            # Vẫn đi qua generate_final_answer để thống nhất giọng văn
+            subtasks = [{"type": "calculator", "question": question, **calc}]
+            final = self.generate_final_answer(question, subtasks, chat_history)
             return {
                 "tools_used": ["calculator"],
-                "answer": text,
-                "subtasks": [{"type": "calculator", "question": question, **calc}],
+                "answer": final,
+                "subtasks": subtasks,
                 "sufficient": calc.get("error") is None
                 # KHÔNG trả final_documents / meta cho calculator
             }
 
         # RAG câu đơn
-        rag = self._private_agent.run_rag_retrieval(question, chat_history)
+        rag = self._mcp.call("private_search", {"question": question, "chat_history": chat_history})
         docs = rag.get("final_documents", [])
         subtasks = [{
             "type": "rag",
@@ -370,7 +387,7 @@ class AgentManager:
             "final_documents": docs,
             "meta": rag.get("meta", {})
         }]
-        final = self._final_agent.generate(question, subtasks, chat_history)
+        final = self.generate_final_answer(question, subtasks, chat_history)
         return {
             "tools_used": ["rag_retrieval"],
             "answer": final,
