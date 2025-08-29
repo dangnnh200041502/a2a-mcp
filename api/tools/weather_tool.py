@@ -18,4 +18,3 @@ class WeatherTool:
         return {"tool": "weather", "location": None, "status": "sunny"}
 
 
-

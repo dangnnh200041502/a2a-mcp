@@ -37,7 +37,8 @@ def chat_with_agentic_rag(query_input: QueryInput):
 
     if tool == "calculator":
         try:
-            calc_res = agent.use_calculator(effective_question)
+            expr = agent.extract_calculation_expression(effective_question)
+            calc_res = agent.use_calculator(expr)
             if calc_res.get("error") is None:
                 answer = f"Result: {calc_res.get('result')}"
             else:

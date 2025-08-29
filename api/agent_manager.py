@@ -18,8 +18,10 @@ from typing import Any, Dict, List
 import os
 
 from langchain_groq import ChatGroq
-from mcp.client_factory import create_mcp_client
 from query_analyzer import QueryAnalyzer
+from tools.weather_tool import WeatherTool
+from tools.calculator_tool import CalculatorTool
+from agents.agent_private import AgentPrivate
 
 
 class AgentManager:
@@ -45,7 +47,10 @@ class AgentManager:
             groq_api_key=os.getenv("GROQ_API_KEY"),
             model_name="openai/gpt-oss-20b",
         )
-        self._mcp = create_mcp_client()
+        # Direct tool instances
+        self._weather = WeatherTool()
+        self._calculator = CalculatorTool()
+        self._private = AgentPrivate()
         self._query_analyzer = QueryAnalyzer()
 
     # ==========================
@@ -55,7 +60,40 @@ class AgentManager:
         """Use QueryAnalyzer to analyze and split query into subtasks."""
         return self._query_analyzer.analyze_query(raw)
 
+    def _detect_calculator_intent(self, question: str) -> bool:
+        """Use LLM to detect if question contains arithmetic calculation."""
+        prompt = f"""
+Analyze if this question contains a mathematical calculation that can be computed.
+Look for arithmetic operations: +, -, *, / with numbers.
 
+Question: {question}
+
+Respond with only "YES" if it contains a calculable expression, or "NO" if not.
+"""
+        try:
+            resp = self._llm.invoke(prompt)
+            text = (getattr(resp, "content", None) or str(resp)).strip().upper()
+            return text == "YES"
+        except Exception:
+            return False
+
+    def _extract_calculation_expression(self, question: str) -> str:
+        """Use LLM to extract arithmetic expression from question."""
+        prompt = f"""
+Extract the mathematical expression from this question.
+Return ONLY the expression with numbers and operators (+, -, *, /), no text.
+
+Question: {question}
+
+Expression:"""
+        try:
+            resp = self._llm.invoke(prompt)
+            expr = (getattr(resp, "content", None) or str(resp)).strip()
+            # Clean up any extra text or formatting
+            expr = re.sub(r'[^0-9\+\-\*/\(\)\.\s]', '', expr).strip()
+            return expr
+        except Exception:
+            return ""
 
     # ==========================
     # Decision
@@ -78,10 +116,10 @@ class AgentManager:
         if normalized and normalized != question:
             question = normalized
 
-        if self._mcp.detect("weather", question):
+        if self._weather.looks_like_weather(question):
             return {"tool": "weather", "reason": "weather intent"}
 
-        if self._mcp.detect("calculator", question):
+        if self._detect_calculator_intent(question):
             return {"tool": "calculator", "reason": "detected arithmetic expression"}
 
         # Heuristic: use private search if looks like private data OR relies on prior context
@@ -119,10 +157,14 @@ class AgentManager:
         return text in ("hello", "hi", "hey", "xin chào", "chào")
 
     def use_weather(self, question: str) -> Dict[str, Any]:
-        return self._mcp.call("weather", {"question": question})
+        return self._weather.use_weather(question)
 
     def use_calculator(self, expression: str) -> Dict[str, Any]:
-        return self._mcp.call("calculator", {"natural_text": expression})
+        return self._calculator.calculate(expression)
+
+    def extract_calculation_expression(self, question: str) -> str:
+        """Public wrapper for extracting arithmetic expression from a question."""
+        return self._extract_calculation_expression(question)
 
     # ==========================
     # Generation via GPT-OSS (main method for final answer generation)
@@ -247,7 +289,7 @@ class AgentManager:
                 })
                 continue
 
-            if self._mcp.detect("weather", sub_q):
+            if self._weather.looks_like_weather(sub_q):
                 w = self.use_weather(sub_q)
                 tools_used.append("weather")
                 subtasks.append({
@@ -255,8 +297,9 @@ class AgentManager:
                     "question": sub_q,
                     **w,
                 })
-            elif self._mcp.detect("calculator", sub_q):
-                calc = self.use_calculator(sub_q)
+            elif self._detect_calculator_intent(sub_q):
+                expr = self._extract_calculation_expression(sub_q)
+                calc = self.use_calculator(expr)
                 tools_used.append("calculator")
                 subtasks.append({
                     "type": "calculator",
@@ -265,8 +308,8 @@ class AgentManager:
                     "error": calc.get("error"),
                 })
             else:
-                # Route sang RAG cho câu tri thức qua MCP
-                rag = self._mcp.call("private_search", {"question": sub_q, "chat_history": chat_history})
+                # Route sang RAG cho câu tri thức trực tiếp
+                rag = self._private.search(sub_q, chat_history)
                 tools_used.append("rag_retrieval")
                 subtasks.append({
                     "type": "rag",
@@ -366,7 +409,8 @@ class AgentManager:
             }
 
         if decision["tool"] == "calculator":
-            calc = self.use_calculator(question)
+            expr = self._extract_calculation_expression(question)
+            calc = self.use_calculator(expr)
             # Vẫn đi qua generate_final_answer để thống nhất giọng văn
             subtasks = [{"type": "calculator", "question": question, **calc}]
             final = self.generate_final_answer(question, subtasks, chat_history)
@@ -379,7 +423,7 @@ class AgentManager:
             }
 
         # RAG câu đơn
-        rag = self._mcp.call("private_search", {"question": question, "chat_history": chat_history})
+        rag = self._private.search(question, chat_history)
         docs = rag.get("final_documents", [])
         subtasks = [{
             "type": "rag",

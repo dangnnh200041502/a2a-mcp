@@ -3,22 +3,20 @@ from __future__ import annotations
 from typing import Any, Dict, List
 import os
 
-from mcp.types import MCPClient
-from pinecone_utils import vectorstore
 from langchain_groq import ChatGroq
+from tools.vector_search import VectorSearchTool
 
 
 class AgentPrivate:
-    """Agent điều phối pipeline Private Search qua MCP tools: expansion → retrieve → fusion → rerank."""
+    """Agent điều phối pipeline Private Search qua function-calling tools: expansion → retrieve → fusion → rerank."""
 
-    def __init__(self, client: MCPClient | None = None) -> None:
-        if client is None:
-            raise ValueError("AgentPrivate requires an MCPClient instance (provided by provider).")
-        self._mcp = client
+    def __init__(self) -> None:
         self._llm = ChatGroq(
             groq_api_key=os.getenv("GROQ_API_KEY"),
             model_name="openai/gpt-oss-20b",
         )
+        # Single composed tool (no MCP)
+        self._vector_search = VectorSearchTool()
 
     def _contextualize(self, original_query: str, chat_history: List[Dict[str, Any]] | None) -> str:
         """Rewrite query into standalone form using brief chat history (ported from langchain_utils)."""
@@ -46,68 +44,34 @@ class AgentPrivate:
         except Exception:
             return original_query
 
-    def _extract_entity(self, question: str) -> str | None:
-        """Try to extract entity name from patterns like 'When was X founded' or 'Where is X headquartered'."""
-        import re
-        text = (question or "").strip()
-        m = re.search(r"When\s+was\s+(.+?)\s+founded", text, re.I)
-        if m:
-            return m.group(1).strip()
-        m = re.search(r"Where\s+is\s+(.+?)\s+headquartered", text, re.I)
-        if m:
-            return m.group(1).strip()
-        return None
-
     def search(self, question: str, chat_history: List[Dict[str, Any]] | None = None) -> Dict[str, Any]:
         # 0) Contextualize (optional, improves coreference handling)
         question = self._contextualize(question, chat_history)
 
-        # 1) Expansion using MCP tool (aware of chat history and multi-asks)
-        exp = self._mcp.call("expansion", {"query": question, "chat_history": chat_history})
-        queries: List[str] = exp.get("queries", [question])
-        # Không gắn cứng facet; expansion tool đã tách các asks nếu cần
+        # Unified vector search pipeline
+        result = self._vector_search.invoke({
+            "query": question,
+            "chat_history": chat_history,
+            "threshold": 0.5,
+            "top_k": 10,
+        })
 
-        # 2) Retrieve for each query
-        retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
-        all_results: List[List[Dict[str, Any]]] = []
-        for q in queries:
-            try:
-                docs = retriever.invoke(q)
-            except Exception:
-                docs = retriever.get_relevant_documents(q)
-            # Chuẩn hóa sang DocumentScore-like dicts
-            rows: List[Dict[str, Any]] = []
-            for i, doc in enumerate(docs):
-                content = getattr(doc, 'page_content', getattr(doc, 'content', str(doc))) or ""
-                rows.append({
-                    "content": content,
-                    "metadata": getattr(doc, 'metadata', {}),
-                    "score": 1.0 - (i * 0.1),
-                    "source_query": q,
-                    "rank": i,
-                })
-            all_results.append(rows)
-
-        # 3) Fusion (RRF)
-        fused = self._mcp.call("fusion", {"queries": queries, "retrieved": all_results}).get("fused", [])
-
-        # 4) Rerank
-        reranked = self._mcp.call("rerank", {"query": question, "documents": fused, "threshold": 0.5, "top_k": 10}).get("documents", [])
-
+        meta: Dict[str, Any] = result.get("meta", {})
         return {
             "original_query": question,
-            "expanded_queries": queries[1:] if len(queries) > 1 else [],
+            "effective_query": result.get("effective_query", question),
+            "expanded_queries": meta.get("expanded_queries", []),
             "final_documents": [
                 {
                     "content": d.get("content", ""),
                     "score": d.get("score", 0.0),
                     "metadata": d.get("metadata", {}),
                 }
-                for d in reranked
+                for d in result.get("final_documents", [])
             ],
-            "retrieved_docs_count": sum(len(r) for r in all_results),
-            "fused_docs_count": len(fused),
-            "final_docs_count": len(reranked),
+            "meta": meta,
+            "retrieved_docs_count": meta.get("retrieved_docs_count", 0),
+            "fused_docs_count": meta.get("fused_docs_count", 0),
+            "final_docs_count": meta.get("final_docs_count", 0),
         }
-
 
