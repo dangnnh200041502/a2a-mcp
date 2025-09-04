@@ -23,17 +23,41 @@ from pinecone import Pinecone, ServerlessSpec
 import re
 import unicodedata
 
-# 1) ENV & PINECONE SETUP
+# 1) ENV & PINECONE SETUP - Lazy initialization
 load_dotenv()
 
-pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+# Global variables for lazy initialization
+_pc = None
+_embeddings = None
+_vectorstore = None
+_index_name = None
 
-# Khởi tạo embeddings và vector store
-embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-index_name = os.getenv("PINECONE_INDEX_NAME", "rag")
+def get_pinecone_client():
+    """Lazy initialization of Pinecone client."""
+    global _pc
+    if _pc is None:
+        _pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+    return _pc
 
-# Kiểm tra và tạo index nếu chưa tồn tại
-try:
+def get_embeddings():
+    """Lazy initialization of embeddings."""
+    global _embeddings
+    if _embeddings is None:
+        _embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    return _embeddings
+
+def get_index_name():
+    """Get index name from environment."""
+    global _index_name
+    if _index_name is None:
+        _index_name = os.getenv("PINECONE_INDEX_NAME", "rag")
+    return _index_name
+
+def ensure_index_exists():
+    """Ensure Pinecone index exists, create if needed."""
+    pc = get_pinecone_client()
+    index_name = get_index_name()
+    
     if index_name not in pc.list_indexes().names():
         pc.create_index(
             name=index_name,
@@ -47,94 +71,83 @@ try:
         print(f"Index '{index_name}' đã được tạo.")
     else:
         print(f"Index '{index_name}' đã tồn tại.")
-except Exception as e:
-    print(f"Error khi tạo index: {e}")
 
-# Khởi tạo vectorstore sau khi đảm bảo index đã tồn tại
-try:
-    vectorstore = PineconeVectorStore(
-        index_name=index_name,
-        embedding=embeddings
-    )
-    print(f"Vectorstore đã được khởi tạo với index '{index_name}'")
-except Exception as e:
-    print(f"Error khi khởi tạo vectorstore: {e}")
-    vectorstore = None
+def get_vectorstore():
+    """Lazy initialization of vectorstore (public API)."""
+    global _vectorstore
+    if _vectorstore is None:
+        # Ensure index exists first
+        ensure_index_exists()
+        
+        # Initialize vectorstore
+        _vectorstore = PineconeVectorStore(
+            index_name=get_index_name(),
+            embedding=get_embeddings()
+        )
+        print(f"Vectorstore đã được khởi tạo với index '{get_index_name()}'")
+    return _vectorstore
+
+# For backward compatibility: previously there was a private _get_vectorstore
+# Now get_vectorstore performs lazy initialization directly.
 
 # 2) SEMANTIC CHUNKING
 from langchain_experimental.text_splitter import SemanticChunker
 
 def build_semantic_chunker():
-    """Khởi tạo SemanticChunker với tham số an toàn.
+    """Khởi tạo SemanticChunker với tham số an toàn."""
+    return SemanticChunker(
+        embeddings=get_embeddings(),
+        buffer_size=5,
+        breakpoint_threshold_type="gradient",
+        breakpoint_threshold_amount=0.75,
+        sentence_split_regex=r"(?<=[.!?])\s+(?!\d+\.\s)",
+        min_chunk_size=512,
+    )
 
-    - Nhánh 1: phiên bản mới (keyword-only args)
-    - Nhánh 2: phiên bản cũ (positional args) để tránh lỗi tương thích.
-    """
-    try:
-        return SemanticChunker(
-            embeddings=embeddings,
-            buffer_size=5,
-            breakpoint_threshold_type="gradient",
-            breakpoint_threshold_amount=0.75,
-            sentence_split_regex=r"(?<=[.!?])\s+(?!\d+\.\s)",
-            min_chunk_size=512,
-        )
-    except TypeError:
-        return SemanticChunker(
-            embeddings,
-            breakpoint_threshold_type="percentile",
-            breakpoint_threshold_amount=95,
-            buffer_size=1,
-        )
+# Lazy initialization of semantic chunker
+_semantic_chunker = None
 
-# Tạo splitter
-semantic_chunker = build_semantic_chunker()
+def get_semantic_chunker():
+    """Lazy initialization of semantic chunker."""
+    global _semantic_chunker
+    if _semantic_chunker is None:
+        _semantic_chunker = build_semantic_chunker()
+    return _semantic_chunker
 
 # 3) LOAD & SPLIT TÀI LIỆU (dùng semantic)
 def load_and_split_document(file_path: str) -> List[Document]:
     """Load 1 file rồi tách thành các chunk ngữ nghĩa (Document)."""
-    try:
-        if file_path.endswith('.pdf'):
-            # Ưu tiên PyMuPDF (tốt về layout/spacing), fallback PDFPlumber, cuối cùng PyPDF
-            loader = None
-            try:
-                loader = PyMuPDFLoader(file_path)
-            except Exception:
-                try:
-                    loader = PDFPlumberLoader(file_path)
-                except Exception:
-                    loader = PyPDFLoader(file_path)
-        elif file_path.endswith('.docx'):
-            loader = Docx2txtLoader(file_path)
-        elif file_path.endswith('.html'):
-            loader = UnstructuredHTMLLoader(file_path)
-        else:
-            raise ValueError(f"Loại tệp không hỗ trợ: {file_path}")
+    if file_path.endswith('.pdf'):
+        # Sử dụng PyMuPDF (tốt về layout/spacing)
+        loader = PyMuPDFLoader(file_path)
+    elif file_path.endswith('.docx'):
+        loader = Docx2txtLoader(file_path)
+    elif file_path.endswith('.html'):
+        loader = UnstructuredHTMLLoader(file_path)
+    else:
+        raise ValueError(f"Loại tệp không hỗ trợ: {file_path}")
 
-        documents = loader.load()
+    documents = loader.load()
 
-        # Sử dụng semantic chunking
-        splits: List[Document] = []
-        for doc in documents:
-            # Làm sạch text trước khi chunk để tránh dính chữ khi trích xuất từ PDF
-            cleaned_text = _clean_text(doc.page_content)
-            text_chunks = semantic_chunker.split_text(cleaned_text)
-            for i, chunk in enumerate(text_chunks):
-                new_doc = Document(
-                    page_content=chunk.strip(),
-                    metadata={**(doc.metadata or {}), "chunk_index": i, "chunk_method": "semantic"}
-                )
-                splits.append(new_doc)
+    # Sử dụng semantic chunking
+    splits: List[Document] = []
+    semantic_chunker = get_semantic_chunker()
+    for doc in documents:
+        # Làm sạch text trước khi chunk để tránh dính chữ khi trích xuất từ PDF
+        cleaned_text = clean_text(doc.page_content)
+        text_chunks = semantic_chunker.split_text(cleaned_text)
+        for i, chunk in enumerate(text_chunks):
+            new_doc = Document(
+                page_content=chunk.strip(),
+                metadata={**(doc.metadata or {}), "chunk_index": i, "chunk_method": "semantic"}
+            )
+            splits.append(new_doc)
 
-        # Loại bỏ chunk rỗng nếu có
-        splits = [d for d in splits if d.page_content]
-        return splits
+    # Loại bỏ chunk rỗng nếu có
+    splits = [d for d in splits if d.page_content]
+    return splits
 
-    except Exception as e:
-        print(f"Error khi tải và chia tài liệu: {e}")
-        return []
-
-def _clean_text(text: str) -> str:
+def clean_text(text: str) -> str:
     """Chuẩn hóa và làm sạch text từ PDF để hạn chế lỗi dính chữ.
 
     - Chuẩn hóa unicode (NFKC)
@@ -167,6 +180,7 @@ def _clean_text(text: str) -> str:
 # 4) INDEX / DELETE VỚI PINECONE
 def index_document_to_pinecone(file_path: str, file_id: int) -> bool:
     """Đọc → chunk → chuẩn hóa metadata → thêm vào Pinecone."""
+    vectorstore = get_vectorstore()
     if vectorstore is None:
         print("Vectorstore chưa được khởi tạo.")
         return False
@@ -179,7 +193,7 @@ def index_document_to_pinecone(file_path: str, file_id: int) -> bool:
 
         # Chuẩn hóa metadata cho mỗi chunk trước khi index
         for j, split in enumerate(splits):
-            split.metadata = _normalize_metadata(
+            split.metadata = normalize_metadata(
                 raw_meta=(split.metadata or {}),
                 file_path=os.path.abspath(file_path),
                 file_id=file_id,
@@ -198,6 +212,7 @@ def delete_doc_from_pinecone(file_id: int) -> bool:
     """
     Xóa tài liệu từ Pinecone theo file_id.
     """
+    vectorstore = get_vectorstore()
     if vectorstore is None:
         print("Vectorstore chưa được khởi tạo.")
         return False
@@ -210,7 +225,7 @@ def delete_doc_from_pinecone(file_id: int) -> bool:
         print(f"Error khi xóa tài liệu với file_id {file_id} từ Pinecone: {str(e)}")
         return False
 
-def _normalize_metadata(raw_meta: dict, file_path: str, file_id: int, chunk_index: int) -> dict:
+def normalize_metadata(raw_meta: dict, file_path: str, file_id: int, chunk_index: int) -> dict:
     """Chuẩn hóa metadata: chỉ giữ trường hữu ích và bổ sung trường chuẩn hệ thống."""
     whitelist_keys = {
         'page',        # int
@@ -226,17 +241,17 @@ def _normalize_metadata(raw_meta: dict, file_path: str, file_id: int, chunk_inde
             meta[k] = raw_meta[k]
 
     # Chuẩn hóa kiểu dữ liệu
-    try:
-        if 'page' in meta:
+    if 'page' in meta:
+        try:
             meta['page'] = int(meta['page'])
-    except Exception:
-        meta.pop('page', None)
+        except (ValueError, TypeError):
+            meta.pop('page', None)
 
-    try:
-        if 'total_pages' in meta:
+    if 'total_pages' in meta:
+        try:
             meta['total_pages'] = int(meta['total_pages'])
-    except Exception:
-        meta.pop('total_pages', None)
+        except (ValueError, TypeError):
+            meta.pop('total_pages', None)
 
     # Bổ sung các trường chuẩn
     meta['source'] = os.path.basename(file_path)

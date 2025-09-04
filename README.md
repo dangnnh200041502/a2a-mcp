@@ -1,74 +1,178 @@
-## RAG System (FastAPI · Pinecone · Gemini · Groq)
+# Agentic RAG Orchestration (A2A + LangGraph + MCP)
 
-README dành cho GitHub: mô tả tổng quát hệ thống RAG, cách cài đặt/chạy Backend (FastAPI) và App (Streamlit), cùng cấu trúc thư mục.
+A lightweight multi-agent system built with A2A (Agent-to-Agent), LangGraph, and MCP. It includes:
+- Host Agent (orchestrator) using LangGraph StateGraph
+- Secret Agent (confidential info retrieval via MCP tools)
+- Web Agent (planner → architect → coder pipeline to generate static web assets)
+- FastAPI app with synchronous chat and SSE streaming endpoints
 
-![Architecture](docs/system.png)
+![Overview](docs/image.png)
 
-## Tính năng chính (tóm tắt)
-- Semantic Chunking (LangChain SemanticChunker)
-- Embeddings (all-MiniLM-L6-v2) → Pinecone
-- Query Expansion (Gemini 1.5 Flash)
-- RRF Fusion + Cross‑Encoder Rerank
-- History‑aware (contextualize trước khi truy hồi)
-- Query Router 0/1 (Gemini + guardrails)
+## Features
+- A2A (Agent-to-Agent) discovery and delegation
+- LangGraph StateGraph with tool routing
+- MCP-hosted tools for both Host and Secret/Web agents
+- Optional Postgres persistence helpers (logs, documents)
 
-## Cấu trúc thư mục
+![Agents](docs/image1.png)
+
+---
+
+## Project Structure
+
 ```
-rag/
+.
 ├─ api/
-│  ├─ main.py                # FastAPI endpoints & orchestration
-│  ├─ query_router.py        # Router 0/1 (Gemini JSON + guardrails)
-│  ├─ langchain_utils.py     # RAG chains & AdvancedRAGPipeline
-│  ├─ pinecone_utils.py      # Load/Clean/Semantic chunking/Index to Pinecone
-│  ├─ query_expansion.py     # Expand query (3 biến thể với Gemini)
-│  ├─ fusion_utils.py        # DocumentScore + RRF
-│  ├─ rerank_utils.py        # Cross‑Encoder reranking
-│  ├─ db_utils.py            # PostgreSQL helpers (history, docs)
-│  ├─ pydantic_models.py     # Pydantic models
-│  └─ requirements.txt
-├─ app/
-│  ├─ streamlit_app.py       # UI chính
-│  ├─ sidebar.py             # Upload/List/Delete tài liệu
-│  ├─ chat_interface.py      # Chat UI + hiển thị kết quả
-│  └─ api_utils.py           # Gọi API /chat, /upload-doc, ...
-├─ docs/                     # Tài liệu mẫu (pdf/docx)
-├─ system.png                # Sơ đồ kiến trúc
-└─ README.md
+│  ├─ agents/
+│  │  ├─ host_agent/
+│  │  │  ├─ __init__.py
+│  │  │  ├─ __main__.py
+│  │  │  ├─ agent.py
+│  │  │  ├─ agent_executor.py
+│  │  │  ├─ description.txt
+│  │  │  └─ instructions.txt
+│  │  ├─ Secret_Agent/
+│  │  │  ├─ __init__.py
+│  │  │  ├─ __main__.py
+│  │  │  ├─ agent.py
+│  │  │  ├─ agent_executor.py
+│  │  │  ├─ description.txt
+│  │  │  └─ instructions.txt
+│  │  └─ Web_App_Agent/
+│  │     ├─ __init__.py
+│  │     ├─ __main__.py
+│  │     ├─ agent.py
+│  │     ├─ agent_executor.py
+│  │     ├─ states.py
+│  │     ├─ planner_instructions.txt
+│  │     ├─ architect_instructions.txt
+│  │     ├─ coder_instructions.txt
+│  │     ├─ instructions.txt
+│  │     └─ description.txt
+│  ├─ utilities/
+│  │  ├─ a2a/
+│  │  │  ├─ agent_connect.py
+│  │  │  ├─ agent_discovery.py
+│  │  │  └─ agent_registry.json
+│  │  ├─ common/
+│  │  │  └─ file_loader.py
+│  │  └─ mcp/
+│  │     ├─ mcp_server_host.py
+│  │     ├─ mcp_server_public.py
+│  │     ├─ mcp_server_private.py
+│  │     └─ mcp_server_web.py
+│  ├─ generated_project_owner_information/
+│  │  ├─ index.html
+│  │  ├─ styles.css
+│  │  ├─ script.js
+│  │  └─ README.md
+│  ├─ main.py
+│  ├─ pydantic_models.py
+│  ├─ pinecone_utils.py
+│  ├─ db_utils.py
+│  └─ app.log
+├─ README.md
+├─ pyproject.toml
 ```
 
-## Cài đặt nhanh
+---
+
+## Prerequisites
+- Python 3.10+
+- Pip
+- A Groq API key exported as environment variable `GROQ_API_KEY`
+- (Optional) PostgreSQL if you want to persist logs/documents
+
+Create a `.env` with:
 ```
-python -m venv .venv
-source .venv/bin/activate
-pip install -r api/requirements.txt
-```
-Tạo file `.env` tại thư mục `rag/`:
-```
-GROQ_API_KEY=your_groq_key
-GOOGLE_API_KEY=your_gemini_key
-GEMINI_ROUTER_MODEL=gemini-1.5-flash
-PINECONE_API_KEY=your_pinecone_key
-PINECONE_INDEX_NAME=rag
-DATABASE_URL=postgresql://user:password@host:5432/dbname
+GROQ_API_KEY=your_key_here
+DATABASE_URL=postgresql://user:pass@localhost:5432/yourdb
 ```
 
-## Chạy Backend (FastAPI)
-```
-uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
-```
-Swagger UI: `http://localhost:8000/docs`
-
-## Chạy App (Streamlit)
-Mặc định `app/api_utils.py` trỏ tới `http://localhost:8000`. Khởi chạy UI:
-```
-streamlit run app/streamlit_app.py
+Install dependencies:
+```bash
+pip install -e .
 ```
 
-## Endpoints chính
-- POST `/chat` – RAG cơ bản (history‑aware → router → retriever + QA)
-- POST `/chat-advanced` – Advanced pipeline (expand → multi‑retrieval → RRF → rerank → LLM)
-- POST `/upload-doc`, GET `/list-docs`, POST `/delete-doc`
+---
 
-## Ghi chú
-- Route 0: trả lời lịch sự và KHÔNG lưu session/log.
-- Có thể tinh chỉnh tham số retrieval/rerank trong advanced pipeline.
+## Cách khởi động
+
+Chạy các lệnh sau (theo đúng thứ tự hoặc riêng lẻ tùy nhu cầu):
+
+1/ python3 -m agents.Web_App_Agent
+
+2/ python3 -m agents.Secret_Agent
+
+3/ python3 -m agents.host_agent
+
+4/ uvicorn main:app --reload
+
+---
+
+## Streaming via SSE
+Endpoint: (removed; use only the chat endpoint)
+
+---
+
+## Agents
+
+### Host Agent
+- Orchestrates requests using LangGraph with A2A-style routing.
+- Binds MCP tools exposed by `utilities/mcp/mcp_server_host.py`.
+- Decides to answer directly or delegate to a child agent.
+
+### Secret Agent
+- Uses MCP tools from `mcp_server_public.py` / `mcp_server_private.py` to retrieve owner/confidential info.
+- Returns a clean JSON-like response in the final message.
+
+### Web Agent
+- Planner → Architect → Coder pipeline using LangGraph.
+- Generates static files (`index.html`, `styles.css`, `script.js`).
+- Output example folder: `api/generated_project_owner_information/`.
+
+---
+
+## Test Cases
+Use these four prompts to verify behavior:
+
+1) When was GreenGrow Innovations founded?
+2) Where it is headquartered?
+3) Create a simple calculator web application.
+4) Please build me a web to answer this question and show on it, what is the owner name and his email ?
+
+Suggested flows:
+- (1) and (2): Direct Q&A or Secret Agent based on tool availability.
+- (3): Delegates to Web Agent to generate the minimal calculator site.
+- (4): First retrieve owner info via Secret Agent, then create a web page (may require two steps depending on your orchestration).
+
+---
+
+## Serving the Generated Web
+The generated files live under `api/generated_project_owner_information/`. Open `index.html` directly in a browser, or serve the directory with a simple static server, for example:
+
+```bash
+# Option A: Python simple HTTP server
+cd api/generated_project_owner_information
+python -m http.server 8080
+# then visit http://127.0.0.1:8080/index.html
+```
+
+If you want FastAPI to serve this folder under `/generated_project`, add a StaticFiles mount in `api/main.py`:
+```python
+from fastapi.staticfiles import StaticFiles
+app.mount("/generated_project", StaticFiles(directory="api/generated_project_owner_information"), name="generated")
+```
+Then open:
+```
+http://127.0.0.1:8000/generated_project/index.html
+```
+
+---
+
+## Notes
+- If tools fail with XML-like tool call output, ensure prompts instruct JSON tool calls only.
+- For persistent memory, wire a LangGraph checkpointer (e.g., MemorySaver, Postgres) as needed.
+- The repo includes log files for development traceability; exclude them for production.
+# a2a-mcp
+# a2a-mcp

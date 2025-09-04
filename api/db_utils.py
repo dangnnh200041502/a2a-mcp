@@ -3,7 +3,7 @@ import psycopg2
 import psycopg2.extras
 from dotenv import load_dotenv
 
-# Load biến môi trường
+# Load environment variables
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -112,4 +112,4 @@ def get_all_documents():
 if __name__ == "__main__":
     create_application_logs()
     create_document_store()
-    print("✅ PostgreSQL tables created successfully.")
+    print("PostgreSQL tables created successfully.")

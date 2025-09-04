@@ -9,7 +9,6 @@ class QueryInput(BaseModel):
 class QueryResponse(BaseModel):
     answer: str
     session_id: str
-    tool_used: str | None = None
 
 class DocumentInfo(BaseModel):
     id: int
