@@ -1,110 +1,70 @@
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from pydantic_models import QueryInput, QueryResponse, DocumentInfo, DeleteFileRequest
-from agent_manager import AgentManager
+from agents.agent_manager_mcp import AgentManager
 from db_utils import insert_application_logs, get_chat_history, get_all_documents, insert_document_record, delete_document_record
 from pinecone_utils import index_document_to_pinecone, delete_doc_from_pinecone
 import os
 import uuid
 import logging
 from langchain_groq import ChatGroq
+from fastapi import UploadFile, File, HTTPException
+import os
+import shutil
+from contextlib import asynccontextmanager
+
 logging.basicConfig(filename='app.log', level=logging.INFO)
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Initialize MCP-based AgentManager
+    app.state.agent_manager = AgentManager()
+    yield
+    # Cleanup MCP connection
+    await app.state.agent_manager.cleanup()
+
+app = FastAPI(lifespan=lifespan)
 
 @app.post("/chat")
-def chat_with_agentic_rag(query_input: QueryInput):
-    """Agentic RAG endpoint"""
+async def chat_with_agentic_rag(query_input: QueryInput):
+    """Agentic RAG endpoint using MCP tools"""
     session_id = query_input.session_id
     logging.info(f"Session ID: {session_id}, User Query: {query_input.question}")
 
-    # Lấy history nếu có (đưa vào agent để tự contextualize qua tooling)
+    # Get chat history if available
     chat_history_existing = get_chat_history(session_id) if session_id else []
     effective_question = query_input.question
-
-    # Router: nếu out-of-scope (route=0) -> trả câu lịch sự, KHÔNG lưu session/log
-    try:
-        agent = AgentManager()
-        # Prefer checking original question first for calculator path
-        orig_decision = agent.decide_tool(query_input.question, chat_history_existing)
-        if orig_decision.get("tool") == "calculator":
-            decision = orig_decision
-        else:
-            decision = agent.decide_tool(effective_question, chat_history_existing)
-        tool = decision.get("tool", "rag")
-        reason = decision.get("reason", "")
-    except Exception as e:
-        logging.error(f"Agent manager error: {e}")
-        tool, reason = "rag", "agent_error"
-
-    if tool == "calculator":
-        try:
-            expr = agent.extract_calculation_expression(effective_question)
-            calc_res = agent.use_calculator(expr)
-            if calc_res.get("error") is None:
-                answer = f"Result: {calc_res.get('result')}"
-            else:
-                answer = "I couldn't evaluate that expression."
-        except Exception:
-            answer = "I couldn't evaluate that expression."
-        if not session_id:
-            session_id = str(uuid.uuid4())
-        insert_application_logs(session_id, query_input.question, answer)
-        logging.info(f"Calculator used ({reason}), session saved.")
-        return {"answer": answer, "session_id": session_id, "tool_used": "calculator"}
 
     if not session_id:
         session_id = str(uuid.uuid4())
 
-    question = query_input.question
-    chat_history = get_chat_history(session_id)
-
     try:
-        # Use the new unified answer method (AgentManager tự orchestration)
-        agent = AgentManager()
-        result = agent.answer(
-            effective_question,
-            chat_history,
-        )
-        # Lưu conversation vào database (ensure non-null ai_response)
-        answer_text = result.get("answer") or ""
-        insert_application_logs(session_id, question, answer_text)
-        logging.info(f"Advanced pipeline completed - Session: {session_id}, Question: '{question}'")
+        # Use MCP-based AgentManager
+        agent = app.state.agent_manager
+        result = await agent.answer(effective_question, chat_history_existing)
         
-        meta = result.get("meta", {})
+        # Save conversation to database
+        answer_text = result.get("answer") or ""
+        insert_application_logs(session_id, query_input.question, answer_text)
+        logging.info(f"MCP pipeline completed - Session: {session_id}, Question: '{query_input.question}'")
+        
         tools_used = result.get("tools_used") or []
         response = {
             "answer": answer_text,
             "session_id": session_id,
-            "sufficient": result.get("sufficient", True)
         }
-        # Only include tool_used/subtasks when non-empty
+        # Include tool_used when non-empty
         if tools_used:
             response["tool_used"] = tools_used
-        subtasks = result.get("subtasks") or []
-        if subtasks:
-            response["subtasks"] = subtasks
-
-        # Chỉ bổ sung thông tin retrieval khi có dùng RAG
+        # If RAG used, attach top-1 retrieval snippet to represent retrieval
         if any(t == "rag_retrieval" for t in tools_used):
-            response["pipeline_info"] = {
-                "retrieval_k": meta.get("retrieved_docs_count", 0),
-                "fused_docs": meta.get("fused_docs_count", 0),
-                "final_docs": meta.get("final_docs_count", 0),
-                "expanded_queries": meta.get("expanded_queries", []),
-                "pipeline_status": "completed"
-            }
-            response["final_documents"] = result.get("final_documents", [])
-
+            snippets = result.get("snippets") or []
+            if snippets:
+                response["retrieval"] = snippets[0]
         return response
         
     except Exception as e:
-        logging.error(f"Advanced pipeline error: {e}")
-        raise HTTPException(status_code=500, detail=f"Advanced pipeline error: {e}")
-
- 
-
-from fastapi import UploadFile, File, HTTPException
-import os
-import shutil
+        logging.error(f"MCP pipeline error: {e}")
+        raise HTTPException(status_code=500, detail=f"MCP pipeline error: {e}")
 
 @app.post("/upload-doc")
 def upload_and_index_document(file: UploadFile = File(...)):
