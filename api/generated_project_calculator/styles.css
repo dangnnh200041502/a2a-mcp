@@ -1,0 +1,94 @@
+/* Root variables for consistent theming */
+:root {
+  /* Color palette */
+  --bg-color: #2c3e50;          /* Calculator background */
+  --display-bg: #34495e;        /* Display background */
+  --btn-color: #1abc9c;         /* Default button color */
+  --btn-hover: #16a085;         /* Hover state for buttons */
+  --btn-active: #148f77;        /* Active/pressed state */
+  --clear-color: #e74c3c;       /* Clear button */
+  --clear-hover: #c0392b;
+  --equals-color: #f39c12;      /* Equals button */
+  --equals-hover: #e67e22;
+  --text-color: #ecf0f1;        /* Text color on dark backgrounds */
+  --font-size-base: 1.2rem;     /* Base font size for buttons */
+}
+
+/* Calculator container */
+#calculator {
+  max-width: 320px;
+  margin: 2rem auto;
+  padding: 1rem;
+  background: var(--bg-color);
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.1);
+  border-radius: 0.5rem;
+}
+
+/* Display panel */
+.display {
+  height: 60px;
+  background: var(--display-bg);
+  color: var(--text-color);
+  font-size: 2rem;
+  text-align: right;
+  padding: 0.5rem;
+  border-radius: 0.3rem;
+  overflow: hidden;
+}
+
+/* Buttons grid */
+.buttons {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+/* Base button styling */
+.btn {
+  padding: 1rem;
+  font-size: var(--font-size-base);
+  background: var(--btn-color);
+  color: var(--text-color);
+  border: none;
+  border-radius: 0.3rem;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+/* Hover & active states */
+.btn:hover {
+  background: var(--btn-hover);
+}
+.btn:active {
+  background: var(--btn-active);
+}
+
+/* Special button overrides */
+.btn.clear {
+  background: var(--clear-color);
+}
+.btn.clear:hover {
+  background: var(--clear-hover);
+}
+
+.btn.equals {
+  background: var(--equals-color);
+}
+.btn.equals:hover {
+  background: var(--equals-hover);
+}
+
+/* Responsive adjustments for smaller screens */
+@media (max-width: 480px) {
+  #calculator {
+    max-width: 90%;
+  }
+  .display {
+    font-size: 1.5rem;
+  }
+  .btn {
+    font-size: 1rem;
+    padding: 0.8rem;
+  }
+}

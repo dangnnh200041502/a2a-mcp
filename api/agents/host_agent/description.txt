@@ -1,0 +1,1 @@
+Intelligent orchestration agent that helps users by answering general questions directly or delegating to specialized A2A agents when appropriate. Uses agent discovery to dynamically find the best agent for each task.

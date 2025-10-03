@@ -1,0 +1,1 @@
+A specialized agent that can access and retrieve confidential information from private documents. It has the ability to access owner's email address and personal information, making it capable of answering questions about sensitive business and personal data that other agents cannot access.

@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Simple Calculator</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="calculator">
+    <div id="display" class="display" aria-live="polite"></div>
+    <div class="buttons">
+      <!-- Digit buttons 0-9 -->
+      <button class="btn digit" data-digit="0" aria-label="Zero">0</button>
+      <button class="btn digit" data-digit="1" aria-label="One">1</button>
+      <button class="btn digit" data-digit="2" aria-label="Two">2</button>
+      <button class="btn digit" data-digit="3" aria-label="Three">3</button>
+      <button class="btn digit" data-digit="4" aria-label="Four">4</button>
+      <button class="btn digit" data-digit="5" aria-label="Five">5</button>
+      <button class="btn digit" data-digit="6" aria-label="Six">6</button>
+      <button class="btn digit" data-digit="7" aria-label="Seven">7</button>
+      <button class="btn digit" data-digit="8" aria-label="Eight">8</button>
+      <button class="btn digit" data-digit="9" aria-label="Nine">9</button>
+
+      <!-- Operation buttons -->
+      <button class="btn op" data-op="+" aria-label="Add">+</button>
+      <button class="btn op" data-op="-" aria-label="Subtract">-</button>
+      <button class="btn op" data-op="×" aria-label="Multiply">×</button>
+      <button class="btn op" data-op="÷" aria-label="Divide">÷</button>
+
+      <!-- Functional buttons -->
+      <button class="btn clear" data-clear aria-label="Clear">C</button>
+      <button class="btn equals" data-equals aria-label="Equals">=</button>
+    </div>
+  </div>
+  <script src="app.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,1 @@
+It uses a multi-agent workflow (planner, architect, coder) to turn natural language requirements into working HTML/CSS/JavaScript projects. Supports both simple static pages and interactive web apps.

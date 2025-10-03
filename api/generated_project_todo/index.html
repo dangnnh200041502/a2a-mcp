@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SimpleTodoApp</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <header>
+        <h1>SimpleTodoApp</h1>
+    </header>
+    <main>
+        <section id="task-input-section">
+            <form id="new-task-form" onsubmit="return false;">
+                <input type="text" id="new-task-input" placeholder="Enter a new task..." required>
+                <button type="submit" id="add-task-btn">Add Task</button>
+            </form>
+        </section>
+        <section id="filter-controls">
+            <button id="filter-all" class="filter-btn" data-filter="all">All</button>
+            <button id="filter-active" class="filter-btn" data-filter="active">Active</button>
+            <button id="filter-completed" class="filter-btn" data-filter="completed">Completed</button>
+        </section>
+        <section id="tasks-section">
+            <ul id="task-list">
+                <!-- Tasks will be rendered here -->
+            </ul>
+        </section>
+    </main>
+    <footer>
+        <p>© 2025 SimpleTodoApp. Created by OpenAI Codex.</p>
+    </footer>
+    <script src="script.js"></script>
+</body>
+</html>
