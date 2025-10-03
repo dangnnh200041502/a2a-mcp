@@ -102,12 +102,19 @@ python -m agents.Web_App_Agent --host localhost --port 10000
 python -m agents.Secret_Agent --host localhost --port 10003
 ```
 
-3) Start FastAPI service
+3) Start Host Agent (standalone A2A server, optional) — http://localhost:10001
+```bash
+python -m agents.host_agent --host localhost --port 10001
+```
+
+4) Start FastAPI service
 ```bash
 uvicorn main:app --host localhost --port 8000 --reload
 ```
 
-The Host Orchestrator is embedded in the FastAPI app and delegates to child agents discovered from full path `agentic_mcp-main/api/utilities/a2a/agent_registry.json`:
+Notes:
+- The Host Orchestrator is already embedded inside the FastAPI app. Running the standalone Host Agent in step 3 is optional (useful for testing via the A2A server directly).
+- Delegation to child agents uses the registry at full path `agentic_mcp-main/api/utilities/a2a/agent_registry.json`:
 ```json
 [
   "http://localhost:10000",
